@@ -61,6 +61,7 @@ function ImportSettingsContent() {
 
 function StagedConfigurationSection() {
   const [, canView] = useAlertmanagerAbility(AlertmanagerAction.ViewExternalConfiguration);
+  const [, canUpdate] = useAlertmanagerAbility(AlertmanagerAction.UpdateExternalConfiguration);
   const { data, isLoading, isError, error, refetch } = useAlertmanagerConfig(
     canView ? GRAFANA_RULES_SOURCE_NAME : undefined
   );
@@ -143,7 +144,9 @@ function StagedConfigurationSection() {
             </EmptyState>
           )}
 
-          {!isLoading && !isError && stagedConfig && <StagedConfiguration stagedConfig={stagedConfig} />}
+          {!isLoading && !isError && stagedConfig && (
+            <StagedConfiguration stagedConfig={stagedConfig} canUpdate={canUpdate} />
+          )}
         </>
       )}
     </Stack>
