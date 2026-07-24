@@ -396,25 +396,85 @@ func TestStoreWriteAggregatesChunking(t *testing.T) {
 	})
 }
 
-func TestStoreListObjects(t *testing.T) {
+func TestStoreListNamespaces(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, store *Store) {
+		ctx := context.Background()
+		mk := func(ns, name string) objectRef {
+			return objectRef{Group: dashboardsGroup, Resource: dashboardsResource, Namespace: ns, Name: name}
+		}
+		require.NoError(t, store.IncrementDaily(ctx, mk("ns-a", "dash-a"), "2026-06-23", map[string]uint64{"views": 1}))
+		require.NoError(t, store.IncrementDaily(ctx, mk("ns-a", "dash-b"), "2026-06-23", map[string]uint64{"views": 1}))
+		require.NoError(t, store.IncrementDaily(ctx, mk("ns-b", "dash-c"), "2026-06-23", map[string]uint64{"views": 1}))
+
+		ns, err := store.listNamespaces(ctx, dashboardsGroup, dashboardsResource)
+		require.NoError(t, err)
+		require.ElementsMatch(t, []string{"ns-a", "ns-b"}, ns)
+	})
+}
+
+func TestStoreStreamObjectDailies(t *testing.T) {
 	forEachBackend(t, func(t *testing.T, store *Store) {
 		ctx := context.Background()
 		a := newTestObject("dash-a")
 		b := newTestObject("dash-b")
 
+		// dash-a spans multiple days/metrics plus overflow; dash-b is a single day.
 		require.NoError(t, store.IncrementDaily(ctx, a, "2026-06-22", map[string]uint64{"views": 1}))
-		require.NoError(t, store.IncrementDaily(ctx, a, "2026-06-23", map[string]uint64{"views": 1}))
+		require.NoError(t, store.IncrementDaily(ctx, a, "2026-06-23", map[string]uint64{"views": 2, "queries": 5}))
+		require.NoError(t, store.IncrementDaily(ctx, a, overflowBucket, map[string]uint64{"views": 100}))
 		require.NoError(t, store.IncrementDaily(ctx, b, "2026-06-23", map[string]uint64{"queries": 1}))
 
-		objs, err := store.listObjects(ctx, dashboardsGroup, dashboardsResource, "default")
-		require.NoError(t, err)
-		require.Len(t, objs, 2)
-
-		names := map[string]bool{}
-		for _, o := range objs {
-			names[o.Name] = true
+		got := map[string]map[string]map[string]uint64{}
+		for od, err := range store.StreamObjectDailies(ctx, dashboardsGroup, dashboardsResource, "default") {
+			require.NoError(t, err)
+			// Each object is emitted exactly once.
+			_, dup := got[od.Ref.Name]
+			require.False(t, dup, "object %s emitted more than once", od.Ref.Name)
+			got[od.Ref.Name] = od.Daily
 		}
-		require.True(t, names["dash-a"])
-		require.True(t, names["dash-b"])
+
+		require.Len(t, got, 2)
+		require.Equal(t, uint64(1), got["dash-a"]["2026-06-22"]["views"])
+		require.Equal(t, uint64(2), got["dash-a"]["2026-06-23"]["views"])
+		require.Equal(t, uint64(5), got["dash-a"]["2026-06-23"]["queries"])
+		require.Equal(t, uint64(100), got["dash-a"][overflowBucket]["views"])
+		require.Equal(t, uint64(1), got["dash-b"]["2026-06-23"]["queries"])
+
+		// Empty namespace yields nothing.
+		var count int
+		for range store.StreamObjectDailies(ctx, dashboardsGroup, dashboardsResource, "empty") {
+			count++
+		}
+		require.Zero(t, count)
+	})
+}
+
+func TestStoreStreamObjectDailiesManyObjects(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, store *Store) {
+		ctx := context.Background()
+
+		// More than one object, each with enough daily keys to straddle a
+		// readDailyKeys batch boundary, to exercise grouping + chunked reads.
+		const objects = 5
+		const days = 60
+		for n := 0; n < objects; n++ {
+			o := newTestObject(fmt.Sprintf("dash-%02d", n))
+			for d := 0; d < days; d++ {
+				day := fmt.Sprintf("2026-06-%02d", d+1)
+				require.NoError(t, store.IncrementDaily(ctx, o, day, map[string]uint64{"views": uint64(d + 1)}))
+			}
+		}
+
+		seen := map[string]int{}
+		for od, err := range store.StreamObjectDailies(ctx, dashboardsGroup, dashboardsResource, "default") {
+			require.NoError(t, err)
+			seen[od.Ref.Name] = len(od.Daily)
+			require.Equal(t, uint64(1), od.Daily["2026-06-01"]["views"])
+			require.Equal(t, uint64(days), od.Daily[fmt.Sprintf("2026-06-%02d", days)]["views"])
+		}
+		require.Len(t, seen, objects)
+		for name, n := range seen {
+			require.Equal(t, days, n, "object %s should carry all its days", name)
+		}
 	})
 }

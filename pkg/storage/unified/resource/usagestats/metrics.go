@@ -56,3 +56,21 @@ func (m *metrics) dropEvents(reason string, n int) {
 	}
 	m.droppedEvents.WithLabelValues(reason).Add(float64(n))
 }
+
+type reconcilerMetrics struct {
+	reconcileDuration prometheus.Histogram
+}
+
+func newReconcilerMetrics(reg prometheus.Registerer) *reconcilerMetrics {
+	return &reconcilerMetrics{
+		reconcileDuration: promauto.With(reg).NewHistogram(prometheus.HistogramOpts{
+			Name: "unified_storage_stats_reconcile_duration_seconds",
+			Help: "Duration of a usage stats reconcile cycle.",
+			// Native histogram only (no classic Buckets): reconcile duration spans
+			// a wide, hard-to-predict range, and this avoids per-bucket series.
+			NativeHistogramBucketFactor:     1.1,
+			NativeHistogramMaxBucketNumber:  100,
+			NativeHistogramMinResetDuration: time.Hour,
+		}),
+	}
+}

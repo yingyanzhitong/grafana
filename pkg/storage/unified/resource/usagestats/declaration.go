@@ -70,6 +70,15 @@ func (d *Declarations) Lookup(group, resource string) (StatsDeclaration, bool) {
 	return decl, ok
 }
 
+// All returns every declared resource. The order is unspecified.
+func (d *Declarations) All() []StatsDeclaration {
+	out := make([]StatsDeclaration, 0, len(d.byGR))
+	for _, decl := range d.byGR {
+		out = append(out, decl)
+	}
+	return out
+}
+
 func (d *Declarations) Validate() error {
 	for _, decl := range d.byGR {
 		if len(decl.Metrics) > kv.MaxBatchOps {

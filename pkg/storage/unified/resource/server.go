@@ -578,11 +578,24 @@ func NewUninitializedResourceServer(opts ResourceServerOptions) (*server, error)
 		if !ok {
 			return nil, fmt.Errorf("usage stats require a KV-backed storage backend")
 		}
+		statsStore := usagestats.NewStore(kvBackend.KV())
 		// The flush loop relies on a lease to serialize the read-add-write per
 		// namespace; without one, concurrent flushes across pods would lose
 		// increments. NewIngester rejects a nil lease manager.
 		s.statsIngester, err = usagestats.NewIngester(usagestats.IngesterOptions{
-			Store:  usagestats.NewStore(kvBackend.KV()),
+			Store:  statsStore,
+			Leases: kvBackend.LeaseManager(),
+			Reg:    opts.Reg,
+			Log:    logger,
+		})
+		if err != nil {
+			return nil, err
+		}
+		// The reconciler recomputes aggregates from the daily buckets so rolling
+		// windows shrink as days age out. It shares the ingester's per-namespace
+		// flush lease so its read-then-write can't race a concurrent flush.
+		s.statsReconciler, err = usagestats.NewReconciler(usagestats.ReconcilerOptions{
+			Store:  statsStore,
 			Leases: kvBackend.LeaseManager(),
 			Reg:    opts.Reg,
 			Log:    logger,
@@ -690,6 +703,9 @@ type server struct {
 	// statsIngester buffers and flushes usage stats events. nil when the
 	// usage stats feature is off or the backend is not KV-backed.
 	statsIngester *usagestats.Ingester
+	// statsReconciler recomputes usage stats aggregates from the daily buckets.
+	// nil when the usage stats feature is off or the backend is not KV-backed.
+	statsReconciler *usagestats.Reconciler
 }
 
 // Init implements ResourceServer.
@@ -719,6 +735,10 @@ func (s *server) Init(ctx context.Context) error {
 
 		if s.initErr == nil && s.statsIngester != nil {
 			s.initErr = services.StartAndAwaitRunning(s.ctx, s.statsIngester)
+		}
+
+		if s.initErr == nil && s.statsReconciler != nil {
+			s.initErr = services.StartAndAwaitRunning(s.ctx, s.statsReconciler)
 		}
 
 		if s.initErr != nil {
@@ -799,6 +819,12 @@ func (s *server) Stop(ctx context.Context) error {
 	}
 
 	var stopFailed bool
+
+	if s.statsReconciler != nil {
+		if err := services.StopAndAwaitTerminated(ctx, s.statsReconciler); err != nil {
+			s.log.Warn("usage stats reconciler failed to stop cleanly", "error", err)
+		}
+	}
 
 	if s.statsIngester != nil {
 		if err := services.StopAndAwaitTerminated(ctx, s.statsIngester); err != nil {
